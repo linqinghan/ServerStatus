@@ -6,8 +6,7 @@
 
 
 # 这边根据需要修改服务器的IP和端口
-SERVER = "120.77.172.176"
-#SERVER = "127.0.0.1"
+SERVER = "127.0.0.1"
 PORT = 35601
 USER = "s04"  # 这边的用户名和密码需要在服务器上config.json文件中存在
 PASSWORD = "USER_DEFAULT_PASSWORD"
