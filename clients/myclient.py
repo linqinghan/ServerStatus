@@ -27,7 +27,9 @@ import sys
 class MachineInfo():
 	''' 获取设备相关的信息 '''
 	def __init__(self):
-		pass
+		self.net_stat = collections.deque(maxlen=10)
+
+		self.add_one_net_state()
 	
 	def get_uptime(self):
 		''' 获取开机到现在的时间 '''
@@ -43,19 +45,21 @@ class MachineInfo():
 		return int(Mem.total/1024.0), int(MemUsed/1024.0)
 
 	def get_swap(self):
-		''' 获取Swap的总内存和已使用的内存 '''
+		''' 获取Swap的总内存和已使用的内存, 单位：KB '''
 		Mem = psutil.swap_memory()
 		return int(Mem.total/1024.0), int(Mem.used/1024.0)
 
 	def get_hdd(self):
-		''' 获取硬盘的容量和已使用的空间 '''
+		''' 获取硬盘的容量和已使用的空间, 单位:MB '''
 		valid_fs = [ "ext4", "ext3", "ext2", "reiserfs", "jfs", "btrfs", "fuseblk", "zfs", "simfs", "ntfs", "fat32", "exfat", "xfs" ]
 		disks = dict()
 		size = 0
 		used = 0
-		for disk in psutil.disk_partitions():
+
+		for disk in psutil.disk_partitions():	# 获取所有磁盘的信息		
 			if not disk.device in disks and disk.fstype.lower() in valid_fs:
 				disks[disk.device] = disk.mountpoint
+
 		for disk in disks.values():
 			usage = psutil.disk_usage(disk)
 			size += usage.total
@@ -66,23 +70,57 @@ class MachineInfo():
 		''' 获取CPU占用率 '''
 		return psutil.cpu_percent(interval=INTERVAL)
 
-	def get_net_flow(self):
-		''' 获取网络流量 '''
-		NET_IN = 0
-		NET_OUT = 0
+	def get_total_net_bytes(self):
+		''' 获取网络发送和接收的总字节数 '''
+		total_recv_bytes = 0
+		total_send_bytes = 0
+
 		net = psutil.net_io_counters(pernic=True)
-		for k, v in net.items():
-			if k == 'lo' or 'tun' in k \
-					or 'br-' in k \
-					or 'docker' in k or 'veth' in k:
+		for interface_name, stat in net.items(): # 获取所有的网络接口的信息
+			# 过滤掉不相干的网络接口
+			if interface_name == 'lo' or 'tun' in interface_name \
+					or 'br-' in interface_name \
+					or 'docker' in interface_name or 'veth' in interface_name:
 				continue
-			else:
-				NET_IN += v[1]
-				NET_OUT += v[0]
-		return NET_IN, NET_OUT
+			
+			total_recv_bytes += stat.bytes_recv
+			total_send_bytes += stat.bytes_sent
+
+		return total_recv_bytes, total_send_bytes
+
+	def add_one_net_state(self):
+		''' 往双向链表添加一个记录 '''
+		stat = {}
+		stat['time'] = time.time()
+		stat['rx'], stat['tx'] = self.get_total_net_bytes()
+
+		self.net_stat.append(stat)
+
+	def get_avge_net_bytes(self):
+		''' 获取网络平均的发送和接收的速度 '''
+		self.add_one_net_state()
+		
+		diff_time = self.net_stat[len(self.net_stat) - 1]['time'] - self.net_stat[0]['time']
+		diff_rx = self.net_stat[len(self.net_stat) - 1]['rx'] - self.net_stat[0]['rx']
+		diff_tx = self.net_stat[len(self.net_stat) - 1]['tx'] - self.net_stat[0]['tx']
+
+		if diff_time == 0 or len(self.net_stat) == 1:
+			return (diff_rx, diff_tx)
+
+		avg_rx = diff_rx / diff_time
+		avg_tx = diff_tx / diff_time
+
+		return (avg_rx, avg_tx)
+
+	def get_avg_load(self):
+		''' 获取系统的平均负载[仅在Linux系统可用] '''
+		if 'linux' in sys.platform:
+			return os.getloadavg()
+		return (0.0, 0.0, 0.0)
+		# Load_1, Load_5, Load_15 = os.getloadavg() if 'linux' in sys.platform else (0.0, 0.0, 0.0)
 
 	def get_network(self, ip_version):
-		''' '''
+		''' 连接 IPV4或IPV6网址 '''
 		if(ip_version == 4):
 			HOST = "ipv4.google.com"
 		elif(ip_version == 6):
@@ -96,6 +134,7 @@ class MachineInfo():
 
 	# todo: 不确定是否要用多线程or多进程:  效率? 资源?　
 	def ip_status(self):
+		''' 连接指定网络，判断是否通 '''
 		object_check = ['www.10010.com', 'www.189.cn', 'www.10086.cn']
 		ip_check = 0
 		for i in object_check:
@@ -112,42 +151,66 @@ class MachineInfo():
 		else:
 			return True
 
-class Traffic:
-	def __init__(self):
-		self.rx = collections.deque(maxlen=10)
-		self.tx = collections.deque(maxlen=10)
+	def get_sys_info(self, update_online_flag, check_ip):
+		''' 获取系统信息，通过字典返回结果 '''
+		NetRx, NetTx = self.get_avge_net_bytes()
+		NET_IN, NET_OUT = self.get_total_net_bytes()
+		
+		Load_1, Load_5, Load_15 = self.get_avg_load()
+		MemoryTotal, MemoryUsed = self.get_memory()
+		SwapTotal, SwapUsed = self.get_swap()
+		HDDTotal, HDDUsed = self.get_hdd()
 
-	def get(self):
-		avgrx = 0; avgtx = 0
-		for name, stats in psutil.net_io_counters(pernic=True).items():
-			if name == "lo" or name.find("tun") > -1 \
-					or name.find("docker") > -1 or name.find("veth") > -1 \
-					or name.find("br-") > -1:
-				continue
-			avgrx += stats.bytes_recv
-			avgtx += stats.bytes_sent
+		array = {}
 
-		self.rx.append(avgrx)
-		self.tx.append(avgtx)
-		avgrx = 0; avgtx = 0
+		if update_online_flag:
+			array['online' + str(check_ip)] = ma.get_network(check_ip)
 
-		l = len(self.rx)
-		for x in range(l - 1):
-			avgrx += self.rx[x+1] - self.rx[x]
-			avgtx += self.tx[x+1] - self.tx[x]
+		array['uptime'] = self.get_uptime()
+		array['load_1'] = Load_1
+		array['load_5'] = Load_5
+		array['load_15'] = Load_15
+		array['memory_total'] = MemoryTotal
+		array['memory_used'] = MemoryUsed
+		array['swap_total'] = SwapTotal
+		array['swap_used'] = SwapUsed
+		array['hdd_total'] = HDDTotal
+		array['hdd_used'] = HDDUsed
+		array['cpu'] = self.get_cpu()
+		array['network_rx'] = NetRx
+		array['network_tx'] = NetTx
+		array['network_in'] = NET_IN
+		array['network_out'] = NET_OUT
+		array['ip_status'] = self.ip_status()
 
-		avgrx = int(avgrx / l / INTERVAL)
-		avgtx = int(avgtx / l / INTERVAL)
+		return array
 
-		return avgrx, avgtx
-
-	def get_sys_info(self):
-		pass
 
 def SendDataToServer(SERVER, PORT, USER, PWD, INTERVAL):
     ''' 给指定服务器发送设备的信息 '''
 	
     pass
+
+if __name__ == "__main2__":
+	ma = MachineInfo()
+	print(ma.get_sys_info(True, 4))
+	
+	first_time = time.time()
+	while True:				
+		curr_time = time.time()
+		if curr_time - first_time > 30:
+			print("Break")
+			break
+		print("hello....")
+		time.sleep(1)
+	# count = 0
+	# while True:
+	# 	if count >= 10:
+	# 		break
+	# 	count += 1
+	# 	print(ma.get_avge_net_bytes())
+	# 	time.sleep(3)
+
 
 if __name__ == '__main__':
 	for argc in sys.argv:
@@ -162,7 +225,7 @@ if __name__ == '__main__':
 		elif 'INTERVAL' in argc:
 			INTERVAL = int(argc.split('INTERVAL=')[-1])
 
-	ma = MachineInfo();
+	ma = MachineInfo()
 	socket.setdefaulttimeout(30)
 	while True:
 		try:
@@ -198,45 +261,17 @@ if __name__ == '__main__':
 				print(data)
 				raise socket.error
 
-			traffic = Traffic()
-			# traffic.get()
-			while True:
-				CPU = ma.get_cpu()
-				NetRx, NetTx = traffic.get()
-				NET_IN, NET_OUT = ma.get_net_flow()
-				Uptime = ma.get_uptime()
-				Load_1, Load_5, Load_15 = os.getloadavg() if 'linux' in sys.platform else (0.0, 0.0, 0.0)
-				MemoryTotal, MemoryUsed = ma.get_memory()
-				SwapTotal, SwapUsed = ma.get_swap()
-				HDDTotal, HDDUsed = ma.get_hdd()
-				IP_STATUS = ma.ip_status()
+			update_online_flag = True
+			first_time = time.time()
+			while True:				
+				curr_time = time.time()
+				if curr_time - first_time > 10:
+					first_time = curr_time
+					update_online_flag = True
 
-				array = {}
-				# print("timer = ", timer)
-				if not timer:
-					array['online' + str(check_ip)] = ma.get_network(check_ip)
-					timer = 10
-				else:
-					timer -= 1*INTERVAL
+				array = ma.get_sys_info(update_online_flag, check_ip)
 
-				# print("timer =", timer, ", online = ", array['online' + str(check_ip)])	
-
-				array['uptime'] = Uptime
-				array['load_1'] = Load_1
-				array['load_5'] = Load_5
-				array['load_15'] = Load_15
-				array['memory_total'] = MemoryTotal
-				array['memory_used'] = MemoryUsed
-				array['swap_total'] = SwapTotal
-				array['swap_used'] = SwapUsed
-				array['hdd_total'] = HDDTotal
-				array['hdd_used'] = HDDUsed
-				array['cpu'] = CPU
-				array['network_rx'] = NetRx
-				array['network_tx'] = NetTx
-				array['network_in'] = NET_IN
-				array['network_out'] = NET_OUT
-				array['ip_status'] = IP_STATUS
+				update_online_flag = False
 				strdata = "update " + json.dumps(array) + "\n"
 				# print("Send".center(80, "-"))
 				# print(strdata)
